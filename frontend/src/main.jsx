@@ -47,6 +47,93 @@ function GeoMap({pickup,destination,pickable=false,value,onSelect}) {
     </MapContainer>
   </div>
 }
+// Photon is a public demo geocoder: debounced searches, not for production-scale traffic.
+// A result is only saved when the user selects it and confirms the location.
+const PHOTON_API = 'https://photon.komoot.io/api/'
+function describePlace(feature) {
+  const p = feature.properties || {}
+  const segments = [p.name, p.housenumber && p.street ? `${p.housenumber} ${p.street}` : p.street,
+    p.district, p.city, p.county, p.state, p.country].filter(Boolean)
+  return [...new Set(segments)].join(', ')
+}
+function LocationSearch({onSelect, onAddressSelect}) {
+  const [query,setQuery]=useState('')
+  const [results,setResults]=useState([])
+  const [searching,setSearching]=useState(false)
+  const [error,setError]=useState('')
+  const [locating,setLocating]=useState(false)
+  const [chosen,setChosen]=useState('')
+  useEffect(()=>{
+    const q=query.trim()
+    if(q.length<3 || chosen===q){setResults([]);setSearching(false);return}
+    const controller=new AbortController()
+    const timer=setTimeout(async()=>{
+      setSearching(true);setError('')
+      try{
+        const params=new URLSearchParams({q,limit:'6',lat:'28.6692',lon:'77.4538',lang:'en'})
+        const response=await fetch(`${PHOTON_API}?${params}`,{signal:controller.signal})
+        if(!response.ok)throw new Error('Location search is temporarily unavailable')
+        const data=await response.json()
+        setResults((data.features||[]).filter(f=>Array.isArray(f.geometry?.coordinates)&&f.geometry.coordinates.length>=2))
+      }catch(e){if(e.name!=='AbortError'){setResults([]);setError(e.message||'Location search failed')}}
+      finally{if(!controller.signal.aborted)setSearching(false)}
+    },750)
+    return()=>{clearTimeout(timer);controller.abort()}
+  },[query,chosen])
+  function choose(feature){
+    const [longitude,latitude]=feature.geometry.coordinates
+    if(!Number.isFinite(latitude)||!Number.isFinite(longitude))return
+    const label=describePlace(feature)
+    onSelect({latitude,longitude})
+    onAddressSelect?.(label)
+    setChosen(label)
+    setQuery(label)
+    setResults([])
+    setError('')
+  }
+  function currentLocation(){
+    if(!navigator.geolocation){setError('Your browser does not support location access.');return}
+    setLocating(true);setError('')
+    navigator.geolocation.getCurrentPosition(
+      pos=>{
+        const point={latitude:pos.coords.latitude,longitude:pos.coords.longitude}
+        onSelect(point)
+        setQuery('Current device location — adjust pin if needed')
+        setChosen('Current device location — adjust pin if needed')
+        setResults([])
+        setLocating(false)
+      },
+      err=>{setError(err.message||'Location permission denied');setLocating(false)},
+      {enableHighAccuracy:true,timeout:12000,maximumAge:0}
+    )
+  }
+  return <div style={{margin:'12px 0',position:'relative'}}>
+    <label style={{display:'block',fontWeight:600,marginBottom:6}}>Find a place or address</label>
+    <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+      <input aria-label='Search location' value={query}
+        onChange={e=>{setQuery(e.target.value);setChosen('')}}
+        placeholder='e.g. Gaur City 2, Greater Noida West'
+        style={{flex:'1 1 210px',minWidth:0,padding:'11px 12px',border:'1px solid #C9D7E6',borderRadius:8}}/>
+      <button type='button' className='btn btn-outline' disabled={locating} onClick={currentLocation}>
+        <MapPin size={16}/>{locating?'Locating...':'Use my location'}
+      </button>
+    </div>
+    {searching&&<p role='status' style={{fontSize:12,margin:'6px 0'}}>Searching places...</p>}
+    {error&&<p role='alert' style={{color:'#B42318',fontSize:12,margin:'6px 0'}}>{error}</p>}
+    {!searching&&query.trim().length>=3&&!chosen&&results.length===0&&!error&&
+      <p style={{fontSize:12,margin:'6px 0'}}>No matching place yet. Try adding Ghaziabad or Greater Noida.</p>}
+    {results.length>0&&<div role='listbox' aria-label='Location suggestions'
+      style={{border:'1px solid #D8E4F0',borderRadius:8,marginTop:6,maxHeight:210,overflowY:'auto',background:'#fff'}}>
+      {results.map((item,index)=><button type='button' role='option' aria-selected={false}
+        key={`${item.properties?.osm_id||index}-${index}`} onClick={()=>choose(item)}
+        style={{display:'block',width:'100%',textAlign:'left',padding:'10px 12px',background:'#fff',border:0,borderBottom:'1px solid #EDF2F7',cursor:'pointer',color:'#17324F'}}>
+        <MapPin size={14} style={{verticalAlign:'middle',marginRight:7}}/>{describePlace(item)||'Unnamed place'}
+      </button>)}
+    </div>}
+    <p style={{fontSize:12,color:'#63778C',margin:'7px 0 0'}}>Select a suggestion to move the pin, then check the exact entrance on the map. GPS requires browser permission and HTTPS or localhost.</p>
+  </div>
+}
+
 function LocationModal({title,description,initial,onSave,close,busy}) {
   const [point,setPoint]=useState(initial||null)
   return <div className='modal-overlay' onMouseDown={close}>
@@ -54,8 +141,8 @@ function LocationModal({title,description,initial,onSave,close,busy}) {
       <div className='modal-head'><div><span className='section-kicker'>GIS LOCATION</span><h2>{title}</h2><p>{description}</p></div>
         <button className='icon-btn' onClick={close}><X size={21}/></button></div>
       <div className='tracking-body'>
-        <p style={{marginTop:0}}>Click the map to select the actual location. The initial map centre is not saved automatically.</p>
-        <GeoMap pickable value={point} onSelect={setPoint}/>
+        <p style={{marginTop:0}}>Search for a place, use your device location, or click the map. Confirm the exact receiving or pickup point before saving.</p>
+        <LocationSearch onSelect={setPoint}/><GeoMap pickable value={point} onSelect={setPoint}/>
         {point ? <p style={{fontSize:13}}>Selected: {point.latitude.toFixed(6)}, {point.longitude.toFixed(6)}</p>
           : <p style={{fontSize:13}}>No coordinates selected yet.</p>}
         <div className='row-actions' style={{marginTop:12}}>
@@ -181,7 +268,7 @@ function DonationModal({close,submit,busy,initial}) {
         <label className="span-two">Pickup address<input disabled={!!initial} required minLength="5" value={form.address} onChange={e=>set('address',e.target.value)} placeholder="Complete pickup address"/></label>
         <label>Food preparation time<input disabled={!!initial} required type="datetime-local" value={form.prepared_at} onChange={e=>set('prepared_at',e.target.value)}/></label>
         <label>Pickup deadline<input required type="datetime-local" min={toLocalDateTime(Date.now())} value={form.deadline} onChange={e=>set('deadline',e.target.value)}/></label>
-        {!initial&&<div className="span-two"><label>Pickup location on map (required for GIS matching)</label><p style={{fontSize:13}}>Click your actual pickup position. The map does not guess it from the locality.</p><GeoMap pickable value={pickupPoint} onSelect={setPickupPoint}/>{pickupPoint&&<small>Selected: {pickupPoint.latitude.toFixed(6)}, {pickupPoint.longitude.toFixed(6)}</small>}</div>}
+        {!initial&&<div className="span-two"><label>Pickup location on map (required for GIS matching)</label><p style={{fontSize:13}}>Search for the pickup venue, select a suggestion, and verify the exact building or entrance pin.</p><LocationSearch onSelect={setPickupPoint} onAddressSelect={address=>set('address',address.slice(0,300))}/><GeoMap pickable value={pickupPoint} onSelect={setPickupPoint}/>{pickupPoint&&<small>Selected: {pickupPoint.latitude.toFixed(6)}, {pickupPoint.longitude.toFixed(6)}</small>}</div>}
         {dateError && <p className="span-two" role="alert" style={{color:'#B42318',margin:0}}>{dateError}</p>}
         <div className="span-two modal-actions"><button type="button" className="btn btn-outline" onClick={close}>Cancel</button><button disabled={busy} className="btn btn-dark">{busy?'Saving...':initial?'Save changes':'Publish donation'} <ArrowRight size={16}/></button></div>
       </form>
