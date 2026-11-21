@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: foodrescue
+      POSTGRES_PASSWORD: foodrescue
+      POSTGRES_DB: foodrescue
+    ports:
+      - '5432:5432'
+    volumes:
+      - foodrescue_pg:/var/lib/postgresql/data
+volumes:
+  foodrescue_pg:
