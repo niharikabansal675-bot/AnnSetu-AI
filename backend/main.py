@@ -1,8 +1,3 @@
-"""Food Rescue — secure role-based prototype API.
-
-Real NGO organisations must enrol and be approved before receiving real donations.
-Sample NGOs are simulation-only; no real food pickup should be arranged from demo data.
-"""
 from __future__ import annotations
 import base64
 from datetime import datetime, timedelta, timezone
@@ -69,6 +64,26 @@ class Donation(Base):
     is_demo: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+class CollectorTracking(Base):
+    __tablename__ = 'collector_tracking'
+    donation_id: Mapped[int] = mapped_column(ForeignKey('donations.id'), primary_key=True)
+    collector_id: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    sharing: Mapped[bool] = mapped_column(Boolean, default=False)
+    latitude: Mapped[float | None] = mapped_column(nullable=True)
+    longitude: Mapped[float | None] = mapped_column(nullable=True)
+    accuracy_m: Mapped[float | None] = mapped_column(nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+class DeliveryReceipt(Base):
+    __tablename__ = 'delivery_receipts'
+    donation_id: Mapped[int] = mapped_column(ForeignKey('donations.id'), primary_key=True)
+    confirmed_by: Mapped[int] = mapped_column(ForeignKey('users.id'))
+    receiver_name: Mapped[str] = mapped_column(String(130))
+    received_quantity: Mapped[int] = mapped_column(Integer)
+    condition: Mapped[str] = mapped_column(String(25))
+    notes: Mapped[str] = mapped_column(String(500), default='')
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 class Offer(Base):
     __tablename__ = 'offers'
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -119,6 +134,16 @@ class DonationIn(BaseModel):
     # Optional until the map picker is added to the React donation form.
     latitude: float | None = Field(default=None, ge=-90, le=90)
     longitude: float | None = Field(default=None, ge=-180, le=180)
+
+class LivePointIn(CoordinatesIn):
+    accuracy_m: float = Field(ge=0, le=10000)
+
+class DeliveryConfirmIn(BaseModel):
+    receiver_name: str = Field(min_length=2, max_length=130)
+    received_quantity: int = Field(gt=0, le=100000)
+    condition: Literal['good', 'partially_damaged', 'rejected']
+    notes: str = Field(default='', max_length=500)
+    confirmed_received: bool
 
 class ScanIn(BaseModel):
     token: str
@@ -186,6 +211,53 @@ def log(db, donation_id, actor, action, detail, actor_id=None):
 GIS_RADIUS_KM = float(os.getenv('GIS_MATCH_RADIUS_KM', '20'))
 if not 0 < GIS_RADIUS_KM <= 100:
     raise ValueError('GIS_MATCH_RADIUS_KM must be between 0 and 100')
+
+# OSRM's public endpoint is a prototype-only routing service. For production,
+# configure OSRM_BASE_URL to your own or a contracted routing service.
+OSRM_BASE_URL = os.getenv('OSRM_BASE_URL', 'https://router.project-osrm.org').rstrip('/')
+OSRM_TIMEOUT_SECONDS = 3
+
+
+def driving_route(pickup: dict, destination: dict, include_geometry: bool = False):
+    """Road-network estimate; None means unavailable, never zero or a guessed ETA.
+
+    Coordinates are passed to OSRM as longitude,latitude (GeoJSON order).
+    Call only for authorised donation locations or eligible NGO candidates.
+    """
+    from urllib.error import HTTPError, URLError
+    from math import isfinite
+    a, b = pickup, destination
+    try:
+        for point in (a, b):
+            if not (-90 <= point['latitude'] <= 90 and -180 <= point['longitude'] <= 180):
+                return None
+        coords = (f"{a['longitude']:.6f},{a['latitude']:.6f};"
+                  f"{b['longitude']:.6f},{b['latitude']:.6f}")
+        route_url = (f'{OSRM_BASE_URL}/route/v1/driving/{coords}'
+                     f'?overview={"simplified" if include_geometry else "false"}'
+                     f'&geometries=geojson&steps=false')
+        req = urlrequest.Request(route_url, headers={'User-Agent':'AnnSetu-AI/0.2 (educational routing prototype)'})
+        with urlrequest.urlopen(req, timeout=OSRM_TIMEOUT_SECONDS) as response:
+            payload = json.load(response)
+        if payload.get('code') != 'Ok' or not payload.get('routes'):
+            return None
+        route = payload['routes'][0]
+        meters, seconds = float(route['distance']), float(route['duration'])
+        if not all(map(isfinite, (meters, seconds))) or meters < 0 or seconds < 0:
+            return None
+        result = {'route_distance_km':round(meters/1000,2),
+                  'route_duration_minutes':round(seconds/60,1),
+                  'route_source':'OSRM road-network estimate (not live traffic)'}
+        if include_geometry:
+            raw = route.get('geometry',{}).get('coordinates', [])
+            # Leaflet uses [latitude, longitude]; GeoJSON uses [longitude, latitude].
+            if len(raw) <= 3000:
+                result['route_points'] = [[float(y),float(x)] for x,y in raw]
+        return result
+    except (HTTPError, URLError, TimeoutError, ValueError, KeyError, IndexError,
+            TypeError, OSError, json.JSONDecodeError):
+        return None
+
 
 def ensure_postgis(db: Session):
     if db.bind.dialect.name != 'postgresql':
@@ -312,9 +384,16 @@ def donation_geo(donation_id:int,user:User=Depends(current_user),db:Session=Depe
             FROM donations d JOIN users u ON u.id=d.accepted_ngo_id
             WHERE d.id=:id'''),{'id':d.id})
         if distance_m is not None:distance_km=round(float(distance_m)/1000,2)
+    route = driving_route(pickup,destination,include_geometry=True) if pickup and destination else None
     return {'donation_id':d.id,'pickup':pickup,'destination':destination,
-            'straight_line_distance_km':distance_km,'route_distance_km':None,
-            'note':'GIS distance is straight-line only; no GPS tracking or road routing is enabled yet.'}
+            'straight_line_distance_km':distance_km,
+            'route_distance_km':route['route_distance_km'] if route else None,
+            'route_duration_minutes':route['route_duration_minutes'] if route else None,
+            'route_points':route.get('route_points',[]) if route else [],
+            'route_source':route['route_source'] if route else None,
+            'note':('Road routing is an estimated journey without traffic; not live GPS tracking.'
+                    if route else 'Road route unavailable; straight-line GIS distance only.')}
+
 
 @app.get('/api/donations')
 def donations(user:User=Depends(current_user),db:Session=Depends(db_session)):
@@ -474,7 +553,28 @@ def run_coordinator(user:User=Depends(current_user),db:Session=Depends(db_sessio
                 method='not available'
             if dist is None: continue
             eligible.append((dist,-ngo.capacity,ngo,method))
-        eligible.sort(key=lambda x:(x[0],x[1],x[2].id))
+        # Prefer real road-routing estimates when available. If OSRM is unavailable,
+        # the GIS straight-line shortlist still works, but ETA is NOT verified.
+        road_estimates={}
+        if pickup_exists and eligible and not d.is_demo:
+            pickup_point=point_coordinates(db,'donations','pickup_location',d.id)
+            # Bound external requests and rate impact to the five closest GIS candidates.
+            for straight_km,_,candidate,_ in sorted(eligible,key=lambda x:x[0])[:5]:
+                ngo_point=point_coordinates(db,'users','location',candidate.id)
+                if not pickup_point or not ngo_point:continue
+                estimate=driving_route(pickup_point,ngo_point)
+                if estimate:
+                    road_estimates[candidate.id]=estimate
+            # A route duration is only a rough transport estimate. Require an additional
+            # 15-minute operational buffer and preserve the original 30-minute minimum.
+            eligible=[item for item in eligible if (
+                item[2].id not in road_estimates or
+                aware(d.deadline)>utcnow()+timedelta(minutes=max(30,
+                    road_estimates[item[2].id]['route_duration_minutes']+15)))]
+        eligible.sort(key=lambda x:(
+            0 if x[2].id in road_estimates else 1,
+            road_estimates[x[2].id]['route_duration_minutes'] if x[2].id in road_estimates else x[0],
+            x[0],x[1],x[2].id))
         if not eligible:
             log(db,d.id,'agent','escalation','No eligible NGO with confirmed location (real donations), matching capacity, verification and deadline; check GIS coordinates or radius')
             escalated.append(d.id); continue
@@ -482,7 +582,7 @@ def run_coordinator(user:User=Depends(current_user),db:Session=Depends(db_sessio
         # Optional LLM assists selection only within the backend-approved shortlist.
         # It never receives identities, addresses, credentials or unrestricted tools.
         ai_note='Deterministic coordination policy'
-        if os.getenv('OPENAI_API_KEY') and os.getenv('ENABLE_LLM_RANKING','false').lower()=='true':
+        if not road_estimates and os.getenv('OPENAI_API_KEY') and os.getenv('ENABLE_LLM_RANKING','false').lower()=='true':
             try:
                 candidates=[{'candidate':str(n.id),'distance_km':distance_km,'capacity':n.capacity} for distance_km,_,n,_ in eligible[:5]]
                 req_data={'model':os.getenv('OPENAI_MODEL','gpt-4.1-mini'), 'temperature':0,
@@ -499,7 +599,12 @@ def run_coordinator(user:User=Depends(current_user),db:Session=Depends(db_sessio
                 else: ai_note='LLM returned non-eligible candidate; deterministic fallback'
             except Exception as exc:
                 ai_note='LLM unavailable; deterministic fallback: '+type(exc).__name__
-        reason=f'Verified; capacity {ngo.capacity} ≥ quantity {d.quantity}; {distance_method} distance {distance} km; not road travel time; deadline policy valid. NGO makes final choice. {ai_note}.'
+        road=road_estimates.get(ngo.id)
+        route_note=(f'OSRM estimated road distance {road["route_distance_km"]} km and driving time '
+                    f'{road["route_duration_minutes"]} minutes (no live traffic); '
+                    f'pickup deadline assessed with 15-minute buffer.' if road else
+                    'Road estimate unavailable; ETA has NOT been verified; 30-minute minimum deadline policy only.')
+        reason=f'Verified; capacity {ngo.capacity} ≥ quantity {d.quantity}; {distance_method} distance {distance} km; {route_note} NGO makes final choice. {ai_note}.'
         offer=Offer(donation_id=d.id,ngo_id=ngo.id,status='pending',reason=reason,expires_at=min(utcnow()+timedelta(minutes=15),aware(d.deadline)))
         db.add(offer);db.flush()
         log(db,d.id,'agent','offer_created',f'Offer {offer.id} to {ngo.organisation}. {reason}')
@@ -573,12 +678,109 @@ def pickup(donation_id:int,body:ScanIn,user:User=Depends(current_user),db:Sessio
 
 @app.post('/api/donations/{donation_id}/complete')
 def complete(donation_id:int,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    raise HTTPException(409,'Use /api/donations/{donation_id}/delivery-confirm to record receipt details')
+
+# Browser-based, opt-in location updates. No location is stored after sharing ends.
+def tracking_access(d: Donation, user: User):
+    if user.role == 'admin': return
+    if user.role == 'provider' and d.provider_id == user.id: return
+    if user.role == 'ngo' and d.accepted_ngo_id == user.id: return
+    raise HTTPException(404, 'Donation not found')
+
+@app.get('/api/donations/{donation_id}/live')
+def get_live_position(donation_id:int,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    d=db.get(Donation,donation_id)
+    if not d:raise HTTPException(404,'Donation not found')
+    tracking_access(d,user)
+    t=db.get(CollectorTracking, donation_id)
+    active=bool(t and t.sharing and d.status == 'picked_up')
+    updated=aware(t.updated_at) if t and t.updated_at else None
+    fresh=bool(active and updated and (utcnow()-updated).total_seconds() <= 120)
+    # Browser tabs can be suspended or closed without running cleanup.
+    # Auto-expire sessions without an update, so a stale device never remains 'live'.
+    if active and updated and not fresh:
+        t.sharing=False;t.latitude=None;t.longitude=None;t.accuracy_m=None;t.updated_at=None
+        db.commit()
+        active=False
+        updated=None
+    return {'sharing':active,'fresh':fresh,
+      'position':{'latitude':t.latitude,'longitude':t.longitude,'accuracy_m':t.accuracy_m} if fresh and t.latitude is not None and t.longitude is not None else None,
+      'updated_at':updated.isoformat() if active and updated else None,
+      'collector_id':t.collector_id if active and t else None}
+
+@app.post('/api/donations/{donation_id}/live/start')
+def start_live_position(donation_id:int,user:User=Depends(current_user),db:Session=Depends(db_session)):
     require_role(user,'ngo')
     d=db.get(Donation,donation_id)
-    if not d or d.accepted_ngo_id!=user.id:raise HTTPException(404,'Donation not assigned to this NGO')
-    if d.status!='picked_up':raise HTTPException(409,'Pickup must be verified before handover')
-    d.status='completed';log(db,d.id,'ngo','completed','NGO confirmed food received',user.id);db.commit()
-    return {'status':'completed'}
+    if not d or d.accepted_ngo_id!=user.id: raise HTTPException(404,'Donation not assigned')
+    if not user.verified:raise HTTPException(403,'NGO is not verified')
+    if d.status!='picked_up':raise HTTPException(409,'Live sharing requires confirmed pickup')
+    t=db.get(CollectorTracking,donation_id)
+    if t is None:
+        t=CollectorTracking(donation_id=donation_id,collector_id=user.id)
+        db.add(t)
+    t.collector_id=user.id;t.sharing=True
+    t.latitude=None;t.longitude=None;t.accuracy_m=None;t.updated_at=None
+    log(db,d.id,'ngo','location_sharing_started','Collector enabled voluntary delivery location sharing',user.id)
+    db.commit()
+    return {'message':'Location sharing enabled. Keep this page open while delivering.'}
+
+@app.post('/api/donations/{donation_id}/live/update')
+def update_live_position(donation_id:int,body:LivePointIn,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    require_role(user,'ngo')
+    d=db.get(Donation,donation_id)
+    if not d or d.accepted_ngo_id!=user.id:raise HTTPException(404,'Donation not assigned')
+    t=db.get(CollectorTracking,donation_id)
+    if d.status!='picked_up' or not t or not t.sharing or t.collector_id!=user.id:
+        raise HTTPException(409,'Location sharing is not active')
+    t.latitude=round(body.latitude,6);t.longitude=round(body.longitude,6)
+    t.accuracy_m=round(body.accuracy_m,1);t.updated_at=utcnow()
+    db.commit()
+    return {'message':'Location updated','updated_at':t.updated_at.isoformat()}
+
+@app.post('/api/donations/{donation_id}/live/stop')
+def stop_live_position(donation_id:int,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    require_role(user,'ngo')
+    d=db.get(Donation,donation_id)
+    if not d or d.accepted_ngo_id!=user.id:raise HTTPException(404,'Donation not assigned')
+    t=db.get(CollectorTracking,donation_id)
+    if t and t.collector_id==user.id:
+        t.sharing=False;t.latitude=None;t.longitude=None;t.accuracy_m=None;t.updated_at=None
+        log(db,d.id,'ngo','location_sharing_stopped','Collector disabled delivery location sharing',user.id)
+        db.commit()
+    return {'message':'Location sharing stopped and last position cleared'}
+
+@app.get('/api/donations/{donation_id}/delivery-receipt')
+def delivery_receipt(donation_id:int,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    d=db.get(Donation,donation_id)
+    if not d:raise HTTPException(404,'Donation not found')
+    tracking_access(d,user)
+    r=db.get(DeliveryReceipt,donation_id)
+    return {'receipt':{'receiver_name':r.receiver_name,'received_quantity':r.received_quantity,
+      'condition':r.condition,'notes':r.notes,'confirmed_at':aware(r.confirmed_at).isoformat(),
+      'confirmed_by_user_id':r.confirmed_by} if r else None}
+
+@app.post('/api/donations/{donation_id}/delivery-confirm')
+def confirm_delivery(donation_id:int,body:DeliveryConfirmIn,user:User=Depends(current_user),db:Session=Depends(db_session)):
+    require_role(user,'ngo')
+    d=db.get(Donation,donation_id)
+    if not d or d.accepted_ngo_id!=user.id:raise HTTPException(404,'Donation not assigned')
+    if d.status!='picked_up':raise HTTPException(409,'Pickup must be verified first')
+    if not body.confirmed_received:raise HTTPException(422,'Receipt confirmation is required')
+    if body.received_quantity>d.quantity:raise HTTPException(422,'Received quantity cannot exceed donated quantity')
+    if body.condition=='rejected':raise HTTPException(409,'Rejected food must be escalated to an admin; do not mark completed')
+    if db.get(DeliveryReceipt,donation_id):raise HTTPException(409,'Receipt already exists')
+    receipt=DeliveryReceipt(donation_id=d.id,confirmed_by=user.id,receiver_name=body.receiver_name.strip(),
+      received_quantity=body.received_quantity,condition=body.condition,notes=body.notes.strip())
+    db.add(receipt)
+    d.status='completed'
+    t=db.get(CollectorTracking,donation_id)
+    if t:
+        t.sharing=False;t.latitude=None;t.longitude=None;t.accuracy_m=None;t.updated_at=None
+    log(db,d.id,'ngo','delivery_confirmed',
+      f'Receipt attested by {body.receiver_name.strip()}: {body.received_quantity}/{d.quantity} meals; condition {body.condition}. Not independently verified.',user.id)
+    db.commit()
+    return {'message':'Delivery receipt recorded; location sharing stopped','status':'completed'}
 
 @app.get('/api/admin/users')
 def admin_users(user:User=Depends(current_user),db:Session=Depends(db_session)):

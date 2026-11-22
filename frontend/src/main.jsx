@@ -25,12 +25,12 @@ function MapFitPoints({points}) {
   }, [map, JSON.stringify(points)])
   return null
 }
-function GeoMap({pickup,destination,pickable=false,value,onSelect}) {
+function GeoMap({pickup,destination,collector=null,routePoints=[],pickable=false,value,onSelect,height=280}) {
   const points = pickable ? (value ? [[value.latitude,value.longitude]] : []) :
-    [pickup,destination].filter(Boolean).map(p=>[p.latitude,p.longitude])
+    (routePoints.length>1 ? routePoints : [pickup,destination].filter(Boolean).map(p=>[p.latitude,p.longitude]))
   return <div style={{borderRadius:12,overflow:'hidden',border:'1px solid #D8E4F0',marginTop:12}}>
     <MapContainer center={points[0]||GIS_MAP_CENTER} zoom={12} scrollWheelZoom={false}
-      style={{height:280,width:'100%',zIndex:0}}>
+      style={{height,width:'100%',zIndex:0}}>
       <TileLayer attribution='&copy; OpenStreetMap contributors'
         url='https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'/>
       <MapFitPoints points={points}/>
@@ -43,7 +43,9 @@ function GeoMap({pickup,destination,pickable=false,value,onSelect}) {
         radius={9} pathOptions={{color:'#17324F',fillColor:'#F4BF40',fillOpacity:1}}><Popup>Pickup location</Popup></CircleMarker>}
       {!pickable&&destination&&<CircleMarker center={[destination.latitude,destination.longitude]}
         radius={9} pathOptions={{color:'#17324F',fillColor:'#6FA6E8',fillOpacity:1}}><Popup>NGO receiving location</Popup></CircleMarker>}
-      {!pickable&&pickup&&destination&&<Polyline positions={points} pathOptions={{color:'#17324F',dashArray:'7 8',weight:3}}/>}
+      {!pickable&&collector&&<CircleMarker center={[collector.latitude,collector.longitude]} radius={10} pathOptions={{color:'#fff',weight:3,fillColor:'#1E8C79',fillOpacity:1}}><Popup>Latest collector GPS position</Popup></CircleMarker>}
+      {!pickable&&routePoints.length>1&&<Polyline positions={routePoints} pathOptions={{color:'#2365AE',weight:4}}/>}
+      {!pickable&&pickup&&destination&&routePoints.length<2&&<Polyline positions={points} pathOptions={{color:'#17324F',dashArray:'7 8',weight:3}}/>}
     </MapContainer>
   </div>
 }
@@ -284,6 +286,20 @@ function TrackingModal({donation,user,close,action,refresh,flash}){
   const [token,setToken]=useState('')
   const [camera,setCamera]=useState(false)
   const [loading,setLoading]=useState(false)
+  const [live,setLive]=useState(null)
+  const [sharingLocal,setSharingLocal]=useState(false)
+  const [gpsError,setGpsError]=useState('')
+  const watchRef=useRef(null)
+  const sharingRef=useRef(false)
+  const sharingRefWasStarted=useRef(false)
+  const sendingRef=useRef(false)
+  const lastSentAtRef=useRef(0)
+  const [receiverName,setReceiverName]=useState('')
+  const [receivedQuantity,setReceivedQuantity]=useState(String(donation.quantity))
+  const [foodCondition,setFoodCondition]=useState('good')
+  const [receiptNotes,setReceiptNotes]=useState('')
+  const [receiptConfirmed,setReceiptConfirmed]=useState(false)
+  const [receipt,setReceipt]=useState(null)
   const isNgo=user.role==='ngo'&&donation.accepted_ngo_id===user.id
   
   const canQR =
@@ -306,6 +322,29 @@ function TrackingModal({donation,user,close,action,refresh,flash}){
       .then(data=>{if(active)setGeo(data)})
       .catch(error=>{if(active)setGeoError(error.message)})
     return()=>{active=false}
+  },[donation.id])
+
+  useEffect(()=>{
+    let active=true
+    const refreshLive=()=>request(`/api/donations/${donation.id}/live`)
+      .then(data=>{if(active)setLive(data)}).catch(()=>{})
+    refreshLive()
+    const timer=window.setInterval(refreshLive,10000)
+    return()=>{active=false;window.clearInterval(timer)}
+  },[donation.id])
+
+  useEffect(()=>{
+    if(donation.status!=='completed')return
+    request(`/api/donations/${donation.id}/delivery-receipt`).then(data=>setReceipt(data.receipt)).catch(()=>{})
+  },[donation.id,donation.status])
+
+  // Camera/GPS is stopped on modal close or unmount; server-side position is cleared too.
+  useEffect(()=>()=>{
+    sharingRef.current=false
+    if(watchRef.current!==null && navigator.geolocation){navigator.geolocation.clearWatch(watchRef.current);watchRef.current=null}
+    // Avoid leaving a server-side tracking session active after the modal closes.
+    // A best-effort stop uses the token captured by request(); failures remain visible as stale server updates.
+    if(sharingRefWasStarted.current){request(`/api/donations/${donation.id}/live/stop`,'POST').catch(()=>{})}
   },[donation.id])
 
   useEffect(()=>{
@@ -362,6 +401,51 @@ function TrackingModal({donation,user,close,action,refresh,flash}){
     };
   }, [camera]);
 
+  async function startSharing(){
+    if(!navigator.geolocation){setGpsError('This browser does not support GPS.');return}
+    if(!window.isSecureContext){setGpsError('GPS requires HTTPS or localhost.');return}
+    setGpsError('')
+    try{
+      // Obtain permission and a first position before enabling server sharing.
+      const initial=await new Promise((resolve,reject)=>navigator.geolocation.getCurrentPosition(resolve,reject,{enableHighAccuracy:true,timeout:15000,maximumAge:0}))
+      await request(`/api/donations/${donation.id}/live/start`,'POST')
+      sharingRef.current=true;sharingRefWasStarted.current=true;setSharingLocal(true)
+      async function sendPosition(pos){
+        if(!sharingRef.current||sendingRef.current)return
+        if(Date.now()-lastSentAtRef.current < 12000)return
+        lastSentAtRef.current=Date.now()
+        sendingRef.current=true
+        try{
+          await request(`/api/donations/${donation.id}/live/update`,'POST',{
+            latitude:pos.coords.latitude,longitude:pos.coords.longitude,accuracy_m:pos.coords.accuracy
+          })
+          setLive(prev=>({...prev,sharing:true,fresh:true,position:{latitude:pos.coords.latitude,longitude:pos.coords.longitude,accuracy_m:pos.coords.accuracy},updated_at:new Date().toISOString()}))
+        }catch(error){setGpsError(error.message)}finally{sendingRef.current=false}
+      }
+      await sendPosition(initial)
+      watchRef.current=navigator.geolocation.watchPosition(sendPosition,error=>setGpsError(error.message),
+        {enableHighAccuracy:true,maximumAge:15000,timeout:20000})
+    }catch(error){setGpsError(error.message||String(error))}
+  }
+
+  async function stopSharing(){
+    sharingRef.current=false;sharingRefWasStarted.current=false
+    if(watchRef.current!==null){navigator.geolocation.clearWatch(watchRef.current);watchRef.current=null}
+    setSharingLocal(false)
+    try{await request(`/api/donations/${donation.id}/live/stop`,'POST');setLive({sharing:false,fresh:false,position:null,updated_at:null})}
+    catch(error){setGpsError(error.message)}
+  }
+
+  async function confirmDelivery(){
+    setLoading(true)
+    try{
+      const payload={receiver_name:receiverName.trim(),received_quantity:Number(receivedQuantity),
+        condition:foodCondition,notes:receiptNotes,confirmed_received:receiptConfirmed}
+      const result=await action(`/api/donations/${donation.id}/delivery-confirm`,'POST',payload)
+      if(result){await stopSharing();await refresh();close()}
+    }finally{setLoading(false)}
+  }
+
   async function verifyPickup(){
     setLoading(true)
     try{
@@ -369,33 +453,117 @@ function TrackingModal({donation,user,close,action,refresh,flash}){
       if(result){await refresh();close()}
     }finally{setLoading(false)}
   }
-  async function receive(){
-    setLoading(true)
-    try{
-      const result=await action(`/api/donations/${donation.id}/complete`)
-      if(result){await refresh();close()}
-    }finally{setLoading(false)}
-  }
+  const hasPickup = Boolean(geo?.pickup)
+  const hasDestination = Boolean(geo?.destination)
+  const hasRoadRoute = Boolean(hasPickup && hasDestination && geo?.route_points?.length > 1)
+  const hasRoadEstimate = Boolean(hasPickup && hasDestination && geo?.route_distance_km != null)
+  const inTransit = ['picked_up', 'completed'].includes(donation.status)
+  const stepNames = ['Listed', 'Accepted', 'Picked up', 'Completed']
+  const stepIndex = donation.status === 'completed' ? 3 : donation.status === 'picked_up' ? 2 : donation.status === 'accepted' ? 1 : 0
+  const locationText = (point, fallback) => point ? `${point.latitude.toFixed(5)}, ${point.longitude.toFixed(5)}` : fallback
+  const cardStyle = {background:'#fff',border:'1px solid #D7E4F0',borderRadius:14,padding:'15px 17px'}
+  const labelStyle = {fontSize:12,fontWeight:700,color:'#526982',marginBottom:5}
+  const selectedNgoName = donation.accepted_ngo_name || 'Assigned NGO'
+  const routingText = !hasPickup
+    ? 'Pickup location is missing. The provider needs to set the pickup point.'
+    : !hasDestination
+      ? donation.status === 'available'
+        ? 'A delivery destination is not selected yet. The agent may estimate routes to candidate NGOs when it creates offers, but a confirmed route appears only after an NGO accepts.'
+        : 'No saved destination coordinates for the assigned NGO. Ask the NGO to set its receiving location.'
+      : hasRoadRoute
+        ? 'Showing the estimated driving route. This is not live traffic or live collector GPS.'
+        : hasRoadEstimate
+          ? 'Driving distance and time are available, but the route line could not be drawn.'
+          : 'Road routing is temporarily unavailable. The dashed line is straight-line distance, not a driving route.'
 
   return <div className="modal-overlay" onMouseDown={close}>
-    <div className="modal tracking-modal" onMouseDown={e=>e.stopPropagation()}>
-      <div className="modal-head">
-        <div><span className="section-kicker">DONATION #{donation.id}</span><h2>Donation journey</h2><p>{donation.title} · {donation.locality}</p></div>
-        <button className="icon-btn" onClick={close}><X size={21}/></button>
-      </div>
-      <div className="tracking-body">
-        <Status value={donation.status}/>
-        <div className='scan-form' style={{marginTop:16}}><h3>GIS donation map</h3>
-          {geo?.pickup||geo?.destination ? <><GeoMap pickup={geo.pickup} destination={geo.destination}/>
-            <p style={{fontSize:13,marginTop:10}}>Yellow: pickup · Blue: NGO destination. Dashed line is direct distance, not a road route.</p>
-            {geo.straight_line_distance_km!=null&&<p style={{fontSize:13}}>Straight-line distance: {geo.straight_line_distance_km} km</p>}</>
-          : <p>{geoError?`Map unavailable: ${geoError}`:'No saved coordinates yet. The provider must set the pickup location and the NGO must set its receiving location.'}</p>}
-          <p style={{fontSize:12}}>This map is not live GPS tracking. Collector location sharing and road routing are future steps.</p>
+    <div className="modal tracking-modal" onMouseDown={e=>e.stopPropagation()} style={{width:'min(1080px,96vw)',maxWidth:'1080px',maxHeight:'94vh',overflowY:'auto',padding:'24px'}}>
+      <div className="modal-head" style={{marginBottom:18}}>
+        <div>
+          <span className="section-kicker">DONATION #{donation.id} · DELIVERY TRACKING</span>
+          <h2 style={{margin:'7px 0'}}>Donation journey</h2>
+          <p>{donation.title} · {donation.locality} · {donation.quantity} meals</p>
         </div>
+        <button className="icon-btn" onClick={close} aria-label="Close tracking"><X size={21}/></button>
+      </div>
+      <div className="tracking-body" style={{display:'grid',gap:18}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',flexWrap:'wrap',gap:10}}>
+          <Status value={donation.status}/>
+          <span style={{fontSize:12,color:'#617790'}}>Location-based tracking · Not live GPS</span>
+        </div>
+
+        <div style={{...cardStyle,background:'#F3F8FD'}}>
+          <h3 style={{fontSize:16,margin:'0 0 14px',color:'#17324F'}}>Delivery progress</h3>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(4,minmax(0,1fr))',gap:8}}>
+            {stepNames.map((step,i)=><div key={step} style={{minWidth:0}}>
+              <div style={{height:7,borderRadius:9,background:i<=stepIndex?'#17324F':'#D3E0EC',marginBottom:8}}/>
+              <span style={{fontSize:12,fontWeight:i<=stepIndex?700:400,color:i<=stepIndex?'#17324F':'#60758A'}}>{step}</span>
+            </div>)}
+          </div>
+        </div>
+
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(215px,1fr))',gap:12}}>
+          <div style={cardStyle}>
+            <div style={{...labelStyle,display:'flex',alignItems:'center',gap:7}}><MapPin size={15} color="#DAA51B"/> PICKUP · PROVIDER</div>
+            <strong style={{display:'block',fontSize:15,color:'#17324F'}}>{donation.address||donation.locality}</strong>
+            <span style={{fontSize:12,color:'#617790'}}>{locationText(geo?.pickup,'Coordinates not saved')}</span>
+          </div>
+          <div style={cardStyle}>
+            <div style={{...labelStyle,display:'flex',alignItems:'center',gap:7}}><MapPin size={15} color="#377EC5"/> DESTINATION · NGO</div>
+            <strong style={{display:'block',fontSize:15,color:'#17324F'}}>{donation.accepted_ngo_id?selectedNgoName:'Awaiting NGO acceptance'}</strong>
+            <span style={{fontSize:12,color:'#617790'}}>{locationText(geo?.destination,donation.accepted_ngo_id?'Receiving coordinates not saved':'Destination not assigned')}</span>
+          </div>
+        </div>
+
+        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(160px,1fr))',gap:12}}>
+          <div style={cardStyle}>
+            <div style={labelStyle}>DRIVING DISTANCE</div>
+            <div style={{fontSize:23,fontWeight:800,color:'#17324F'}}>{hasRoadEstimate?`${geo.route_distance_km} km`:'—'}</div>
+            <div style={{fontSize:11,color:'#617790'}}>Road-network estimate</div>
+          </div>
+          <div style={cardStyle}>
+            <div style={labelStyle}>ESTIMATED DRIVE</div>
+            <div style={{fontSize:23,fontWeight:800,color:'#17324F'}}>{hasRoadEstimate?`${geo.route_duration_minutes} min`:'—'}</div>
+            <div style={{fontSize:11,color:'#617790'}}>Excludes live traffic</div>
+          </div>
+          <div style={cardStyle}>
+            <div style={labelStyle}>DIRECT DISTANCE</div>
+            <div style={{fontSize:23,fontWeight:800,color:'#17324F'}}>{geo?.straight_line_distance_km!=null?`${geo.straight_line_distance_km} km`:'—'}</div>
+            <div style={{fontSize:11,color:'#617790'}}>PostGIS straight-line</div>
+          </div>
+        </div>
+
+        <div style={{...cardStyle,background:'#EDF5FD',padding:16}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8,marginBottom:10}}>
+            <h3 style={{fontSize:17,margin:0,color:'#17324F'}}>Pickup and delivery map</h3>
+            <span style={{fontSize:12,color:'#526982'}}>{hasRoadRoute?'Estimated road route':hasPickup?'Saved pickup point':'Awaiting location'}</span>
+          </div>
+          {hasPickup||hasDestination ? <GeoMap pickup={geo?.pickup} destination={geo?.destination} collector={live?.fresh?live.position:null} routePoints={geo?.route_points||[]} height={380}/>
+            : <div style={{background:'#fff',border:'1px dashed #B9CBDD',padding:24,borderRadius:12,color:'#536981'}}>No saved map coordinates yet. A provider must set the pickup location.</div>}
+          <div style={{display:'flex',flexWrap:'wrap',gap:18,marginTop:13,fontSize:12,color:'#334E68'}}>
+            <span><b style={{color:'#C99817'}}>●</b> Pickup location</span>
+            <span><b style={{color:'#377EC5'}}>●</b> NGO destination</span>
+            <span>{hasRoadRoute?'━ Driving route':'┄ Direct connection (when both points are available)'}</span>
+          </div>
+          <p role="status" style={{background:'#fff',borderRadius:10,padding:'11px 13px',fontSize:13,color:'#35536D',margin:'12px 0 0'}}>{geoError?`Location service: ${geoError}`:routingText}</p>
+        </div>
+
+        {['picked_up','completed'].includes(donation.status)&&<div style={{...cardStyle,background:'#F3F8FD'}}>
+          <h3 style={{margin:'0 0 8px'}}>Collector location updates</h3>
+          <p style={{fontSize:13}}>Location is shared only after the NGO collector grants permission. Keep this tracking window open during delivery. GPS stops when you close it.</p>
+          <p style={{fontSize:13}}>Sharing: <strong>{live?.sharing?'Enabled':'Off'}</strong> · Position: <strong>{live?.fresh?'Recently updated':live?.sharing?'Waiting for an update':'Not shared'}</strong></p>
+          {live?.updated_at&&<p style={{fontSize:12}}>Last update: {fmt(live.updated_at)}</p>}
+          {live?.position&&<p style={{fontSize:12}}>GPS accuracy: ±{Math.round(live.position.accuracy_m)} m</p>}
+          {isNgo&&donation.status==='picked_up'&&<div className='row-actions'>
+            {!sharingLocal?<button type='button' className='btn btn-dark' onClick={startSharing}><MapPin size={16}/> Start sharing my location</button>
+              :<button type='button' className='btn btn-outline' onClick={stopSharing}>Stop sharing</button>}
+          </div>}
+          {gpsError&&<p role='alert' style={{color:'#B42318',fontSize:13}}>{gpsError}</p>}
+        </div>}
         {canQR&&<div className="qr-card">
           <h3>Pickup verification QR</h3>
           {qr&&<img alt="Unique donation pickup verification QR" className="qr-image" src={qr}/>}
-          <p>Show this code to the assigned NGO collector at pickup. The QR token is a private verification credential.</p>
+          <p>Show this code only to the assigned NGO collector. It is a private verification credential.</p>
         </div>}
         {isNgo&&donation.status==='accepted'&&<div className="scan-form">
           <h3>Verify pickup</h3>
@@ -411,15 +579,24 @@ function TrackingModal({donation,user,close,action,refresh,flash}){
             {loading?'Confirming...':'Confirm QR pickup'}
           </button>
         </div>}
-        {isNgo&&donation.status==='picked_up'&&<div className="scan-form">
-          <h3>Confirm receipt at NGO</h3>
-          <p>Only confirm after your organisation has actually received the food.</p>
-          <button className="btn btn-dark" disabled={loading} onClick={receive}>Confirm handover</button>
+        {isNgo&&donation.status==='picked_up'&&<div className='scan-form'>
+          <h3>Confirm delivery receipt</h3>
+          <p>Only submit when food has physically reached the NGO. This is an account-holder attestation, not independently verified.</p>
+          <label>Receiving person's name<input required minLength={2} maxLength={130} value={receiverName} onChange={e=>setReceiverName(e.target.value)} placeholder='Name of person receiving food'/></label>
+          <label>Meals actually received<input type='number' min={1} max={donation.quantity} value={receivedQuantity} onChange={e=>setReceivedQuantity(e.target.value)}/></label>
+          <label>Food condition<select value={foodCondition} onChange={e=>setFoodCondition(e.target.value)}><option value='good'>Good</option><option value='partially_damaged'>Partially damaged</option><option value='rejected'>Rejected — escalate to admin</option></select></label>
+          <label>Notes (optional)<textarea rows={3} maxLength={500} value={receiptNotes} onChange={e=>setReceiptNotes(e.target.value)}/></label>
+          <label style={{display:'flex',gap:9,alignItems:'start'}}><input type='checkbox' checked={receiptConfirmed} onChange={e=>setReceiptConfirmed(e.target.checked)}/> I confirm that the food was received at the NGO destination.</label>
+          {foodCondition==='rejected'&&<p style={{color:'#B42318'}}>Rejected food cannot be marked completed. Contact an administrator.</p>}
+          <button className='btn btn-dark' disabled={loading||!receiptConfirmed||receiverName.trim().length<2||Number(receivedQuantity)<1||Number(receivedQuantity)>donation.quantity||foodCondition==='rejected'} onClick={confirmDelivery}>{loading?'Saving...':'Record delivery receipt'}</button>
         </div>}
-        <h3>Timestamped history</h3>
-        <div className="timeline">{events.map((event,i)=><div className="timeline-event" key={i}>
-          <span className="timeline-dot"/><div><b>{cap(event.action)}</b><small>{fmt(event.created_at)} · {cap(event.actor)}</small><p>{event.detail}</p></div>
-        </div>)}</div>
+        {receipt&&<div style={cardStyle}><h3>Delivery receipt</h3><p>Received by: {receipt.receiver_name} · Meals: {receipt.received_quantity} · Condition: {cap(receipt.condition)}</p><small>Recorded: {fmt(receipt.confirmed_at)} · Recorded by NGO account, not independent verification</small></div>}
+        <div style={cardStyle}>
+          <h3 style={{margin:'0 0 12px',color:'#17324F'}}>Timestamped activity history</h3>
+          <div className="timeline">{events.length?events.map((event,i)=><div className="timeline-event" key={i}>
+            <span className="timeline-dot"/><div><b>{cap(event.action)}</b><small>{fmt(event.created_at)} · {cap(event.actor)}</small><p>{event.detail}</p></div>
+          </div>):<p style={{color:'#617790'}}>No tracking events recorded.</p>}</div>
+        </div>
       </div>
     </div>
   </div>
