@@ -1,0 +1,12 @@
+import React from 'react'
+import {ArrowUpRight,Package,Clock3,Truck,CheckCircle2,Leaf,MapPin,ScanLine,Send,BrainCircuit,RefreshCcw,Check,Users,ShieldCheck,Search,Activity,Plus,AlertCircle} from 'lucide-react'
+import {fmt,cap} from '../utils/formatters'
+import {Pill,Status} from '../components/StatusBadge'
+import ActivityList from '../components/ActivityList'
+import Empty from '../components/EmptyState'
+
+export default function Overview({donations,stats,navigate,audit}) {
+ return (
+ <>{<><div className="stats-grid">{[[Package,'Total donations',stats.total,'All records'],[Clock3,'Available now',stats.available,'Awaiting response'],[Truck,'In progress',stats.active,'Under coordination'],[CheckCircle2,'Completed',stats.completed,'Confirmed handovers']].map(([Icon,label,value,sub])=><div className="stat-card" key={label}><div className="stat-header"><span>{label}</span><span className="stat-icon"><Icon size={18}/></span></div><strong>{value.toLocaleString()}</strong><small>{sub}</small></div>)}</div><div className="two-col"><div className="panel"><div className="panel-heading"><div><h3>Recent donations</h3><p>Latest activity in your workspace</p></div><button className="link-button" onClick={()=>navigate('donations')}>View all <ArrowUpRight size={15}/></button></div>{donations.length?<div className="compact-list">{donations.slice(0,5).map(d=><div className="compact-row" key={d.id}><span className="list-icon"><Package size={17}/></span><span className="item-main"><b>{d.title}</b><small><MapPin size={12}/>{d.locality} · {d.quantity} meals</small></span><Status value={d.status}/></div>)}</div>:<Empty title="No donations yet" description="Create your first food listing, or ask an admin to seed clearly labelled demo data."/>}</div><div className="panel panel-dark"><span className="mini-eyebrow">THE MISSION</span><div className="panel-dark-symbol"><Leaf size={38}/></div><h2>Every meal<br/>matters.</h2><p>Make a positive difference by connecting good food with people who can share it.</p><button onClick={()=>navigate('coordinator')}>Explore coordination <ArrowUpRight size={16}/></button></div></div><div className="panel"><div className="panel-heading"><div><h3>Latest platform activity</h3><p>Transparent records from every interaction</p></div><button className="link-button" onClick={()=>navigate('activity')}>Activity log <ArrowUpRight size={15}/></button></div><ActivityList items={audit.slice(0,4)}/></div></>}</>
+ )
+}
