@@ -1,145 +1,208 @@
-# AnnSetu-AI | Food Rescue Platform
+# AnnSetu-AI
 
-A full-stack food rescue platform developed as a BCA capstone project, focused on connecting food providers with NGOs in and around Ghaziabad. The aim is to make surplus food donation easier to coordinate and track, from creating a listing to confirming a delivery.
+### An Agentic AI-Powered Food Rescue and Redistribution Platform
 
-The application has separate workspaces for food providers, NGOs and administrators. It includes location-based NGO matching, an automated coordination workflow, QR-based pickup verification, and optional live location sharing during delivery.
+**Connecting surplus food with people who need it through intelligent coordination.**
 
-> **Project status:** Working local MVP. The platform has been tested with sample accounts and donations, but it is **not ready for real food distribution**. NGO identity checks, food-safety procedures, privacy and operational safeguards, and production deployment need further work. Demo organisations are fictional.
+AnnSetu-AI is a full-stack food rescue platform designed to connect restaurants, food providers, and NGOs to support timely redistribution of surplus food. It combines **Agentic AI coordination, geospatial matching, QR-based handover verification, donation tracking, and an experimental fine-tuned language model**.
 
-## Tech stack
+**Project status:** Functional local academic prototype; not a production-deployed service.
 
-| Part | Technology |
-| --- | --- |
-| Frontend | React, Vite, JavaScript, CSS |
-| Backend | Python, FastAPI, SQLAlchemy |
-| Database | PostgreSQL 18 with PostGIS |
-| Maps | React Leaflet, OpenStreetMap |
-| Location search | Photon-based address autocomplete |
-| Road routing | OSRM |
-| Authentication | JWT, password hashing, role-based access |
-| QR pickup | QR generation and browser-based QR scanning |
-| Optional AI integration | OpenAI API for ranking within a pre-approved NGO shortlist |
+---
 
-The interface uses a simple navy, blue, white and yellow theme without gradients.
+## 1. Problem Statement
 
-## Features
+Restaurants, events, cafeterias, hostels, and other food providers may generate surplus food. Finding a verified NGO that can collect that food before the pickup deadline can be difficult, especially without coordinated location, capacity, and handover information.
 
-### 1. Accounts and verification
+AnnSetu-AI explores how a unified digital platform can improve this coordination process and make donation activity more traceable.
 
-Food providers and NGOs can register and sign in. New accounts require administrator approval before participating in live donation workflows. The admin workspace supports account verification and revocation.
+## 2. Project Objectives
 
-### 2. Food donation management
+- Support organised redistribution of surplus food.
+- Connect providers with verified NGOs.
+- Coordinate donations using a rule-governed Agentic AI workflow.
+- Assess NGO capacity, geographic proximity, and pickup deadlines.
+- Allow NGOs to accept or decline offers.
+- Support QR-based pickup verification and delivery tracking.
+- Maintain activity and audit records.
+- Explain backend-verified decisions using an optional fine-tuned Qwen model with a safe fallback.
 
-Verified providers can create a donation with the food type, quantity, pickup address, preparation time, storage details and collection deadline. Providers can view their listings, edit eligible listings and cancel donations when allowed by the workflow.
+## 3. Core Features
 
-### 3. Location-based NGO matching
+### Provider Dashboard
 
-PostGIS is used to identify nearby NGOs based on their stored coordinates. The coordinator also checks account verification, capacity, donation type and pickup deadlines before making an offer. For real donations, the system does not guess an NGO's location from a locality name.
+Providers can register, log in, list available food, set quantities and pickup deadlines, save pickup locations, view matching progress, and track donation status.
 
-### 4. Coordination workflow
+### NGO Dashboard
 
-The coordinator checks available donations, filters eligible NGOs, ranks suitable candidates and sends offers. NGOs can accept or decline. Expired offers can be marked as timed out, and a later coordinator run can attempt another eligible NGO. Actions are recorded in the activity log.
+NGOs can register, maintain their locations and capacities, receive offers, accept or decline requests, and participate in pickup and delivery workflows. Admin verification is required for matching eligibility.
 
-The main workflow is **rule-based**. It follows an *observe → evaluate → act → verify* structure; it is not a trained machine-learning model. Optional LLM-assisted ranking is available through configuration, but the model cannot bypass the eligibility checks.
+### Admin Dashboard
 
-### 5. Maps and road routes
+Administrators can monitor coordination activity, manage verification, review donation information, inspect audit events, and access reporting features.
 
-Providers and NGOs can set their organisation or pickup location through location search and map controls. The tracking screen displays the pickup point, receiving NGO destination, PostGIS straight-line distance and an OSRM road route when available.
+### NGO Matching
 
-OSRM provides an estimated driving distance and duration. These estimates do **not** include live traffic.
+The coordinator checks verified status, available capacity, location, pickup deadline, and previous offers. PostgreSQL/PostGIS provides geographic eligibility checks; OSRM may provide road-network estimates. The selected NGO receives a **pending offer** and retains the choice to accept or decline.
 
-### 6. QR pickup verification
+### Pickup, Delivery, and Audit History
 
-Once an NGO accepts a donation, the provider can display the pickup QR code. The assigned NGO scans the code to confirm collection. The donation then moves from **Accepted** to **Picked Up**.
+The application supports QR-based pickup verification, delivery progress, route visualization when location information is available, and timestamped activity records.
 
-### 7. Optional collector GPS tracking
+**Donation stages:** `Listed → Accepted → Picked Up → Completed`
 
-After pickup verification, the assigned NGO can allow browser location access and start sharing its current position. The tracking screen shows the reported location, update time and browser-reported accuracy. Sharing can be stopped manually and is cleared when delivery is completed.
+## 4. Technology Stack
 
-Location sharing works while the tracking page is active and the browser continues supplying updates. It is not a background mobile-tracking service. The GPS marker indicates an approximate reported position, not proof of arrival.
+| Layer | Technology |
+|---|---|
+| Frontend | React, JavaScript, Vite |
+| Backend | Python, FastAPI |
+| Database | PostgreSQL 18, PostGIS |
+| ORM | SQLAlchemy |
+| Routing | OSRM road-network estimates |
+| Authentication | JWT |
+| Agent orchestration | Python-based T3 workflow |
+| Language model | Qwen3-0.6B |
+| Fine-tuning | LoRA, Hugging Face Transformers, PEFT |
+| GPU development | Kaggle Tesla T4 |
+| Version control | Git, GitHub |
 
-### 8. Delivery receipt and audit history
+## 5. System Architecture
 
-The NGO can record a delivery receipt containing the receiver's name, quantity received, food condition and optional notes. The system logs important events for later review. A receipt currently records the NGO account's declaration; **a separate receiving officer has not independently verified it**.
+```text
+Providers / NGOs / Administrators
+               |
+        React + Vite UI
+               |
+         FastAPI Backend
+               |
+       Auth / Donation APIs
+               |
+      T3 Agentic AI Workflow
+     Observe → Evaluate → Plan → Verify
+               |
+    Rule-Governed Coordination
+               |
+      PostgreSQL + PostGIS
+               |
+       Users / Donations /
+       Offers / Audit Events
 
-### 9. Admin reports
+Optional integrations:
+- OSRM for road-network estimates
+- Separate ML FastAPI explanation service
+  → Fine-tuned Qwen (when GPU is available)
+  → Strict validation or deterministic fallback
+```
 
-The admin workspace provides summaries of donation statuses, offers, coordination activity and completed quantities. These figures represent application records, not independently measured food-distribution outcomes.
+The **backend is the source of truth** for eligibility, actions, and database changes. The language model cannot independently assign an NGO or create an offer.
 
-## Project structure
+## 6. T3 Agentic AI
+
+The agent's read-only planning pipeline follows four stages:
+
+1. **Observe:** Read donation status, deadline, quantity, prior offers, and current state.
+2. **Evaluate:** Find eligible NGOs based on verification, capacity, location, and other constraints.
+3. **Plan:** Propose offering to an NGO, waiting, stopping, or escalating.
+4. **Verify:** Check the proposal's consistency and safety conditions.
+
+A separate, controlled execution layer can revalidate database state before writing. **T3 execution is limited to explicitly enabled synthetic demo records**. Normal donation matching currently uses the deterministic legacy coordinator.
+
+Recovery and scheduling modules handle cases such as pending offers, timeouts, and reassignment.
+
+## 7. Fine-Tuned Qwen Explanation Microservice
+
+An independent FastAPI microservice provides explanations of **backend-verified** decisions. It does not create offers, change donation status, or write to PostgreSQL.
+
+### Model training and evaluation
+
+- Base model: **Qwen3-0.6B**.
+- Fine-tuning: **LoRA** on **302 synthetic AnnSetu-specific examples**.
+- Training environment: **Kaggle Tesla T4 GPU**.
+- Scenarios included expiry, pending offers, capacity, verification, pickup deadlines, missing information, and reassignment.
+- The adapter was saved and successfully reloaded for separate inference.
+- On a 12-case held-out manual evaluation, the fine-tuned model scored **6/12**, the same strict score as the baseline. It is **not sufficiently validated to make autonomous matching decisions**.
+- Three targeted GPU integration examples produced accepted model responses after prompt adjustments. This is a limited functionality check, **not proof of factual reliability**.
+
+The service uses a restrictive explanation validator and deterministic fallback if the model is unavailable or its response is not approved. **GPU-backed model inference is not permanently hosted.**
+
+## 8. Geographic Matching and Fairness
+
+For real donations, geographic eligibility uses saved PostGIS coordinates rather than inferred locality names. The local prototype has been tested with a **20 km configured radius**. OSRM estimates road travel time when available; these estimates do **not** include live traffic.
+
+An **experimental workload-aware fair-matching policy** was implemented to compare similarly situated NGOs using historical offer counts. It remains **disabled pending full isolated integration validation**. The current verified policy prioritizes eligible candidates using road estimates and proximity.
+
+## 9. Donation Workflow
+
+```text
+Provider creates donation
+          |
+Pickup location and deadline saved
+          |
+Coordinator evaluates eligible NGOs
+          |
+Pending NGO offer created
+          |
+NGO accepts or declines
+          |
+QR-based pickup verification
+          |
+Delivery confirmation
+          |
+Activity and audit history
+```
+
+## 10. Project Structure
 
 ```text
 food-rescue-platform/
+├── frontend/                 # React application
 ├── backend/
-│   ├── main.py
-│   ├── agent_worker.py            # optional coordinator worker
-│   ├── create_admin.py
-│   ├── requirements.txt
-│   ├── requirements-dev.txt
+│   ├── app/
+│   │   ├── agents/T3/        # State, tools, planning, verification,
+│   │   │                     # execution, recovery, scheduling
+│   │   ├── routers/          # Auth, donations, offers, admin, T3 routes
+│   │   ├── services/         # GIS, routing, explanation bridge
+│   │   ├── models.py
+│   │   ├── database.py
+│   │   └── security.py
 │   ├── tests/
-│   └── .env.example
-├── frontend/
-│   ├── src/
-│   │   ├── main.jsx
-│   │   ├── App.jsx
-│   │   ├── components/            # navigation and shared UI
-│   │   ├── pages/                 # dashboards and workspaces
-│   │   ├── donations/             # donation forms and tracking modal
-│   │   ├── maps/                  # map and location search
-│   │   ├── tracking/              # QR, GPS and delivery receipt
-│   │   ├── services/              # API requests
-│   │   ├── utils/                 # shared formatting functions
-│   │   └── styles/style.css
-│   ├── package.json
-│   └── vite.config.js
+│   ├── agent_worker.py
+│   └── main.py
+├── ml_service/               # Explanation-only FastAPI service
+│   ├── app.py
+│   ├── model_loader.py
+│   ├── schemas.py
+│   └── tests/
+├── scripts/
+├── deploy/
 └── README.md
 ```
 
-The frontend was divided into smaller React components to make the pages easier to maintain. The backend is still mainly contained in `main.py` and can be modularised later.
+## 11. Run Locally (Windows PowerShell)
 
-## Run locally on Windows
-
-### Requirements
+### Prerequisites
 
 - Python and Node.js/npm
-- PostgreSQL with the PostGIS extension enabled in the application database
-- A local database and valid database credentials
+- PostgreSQL with PostGIS enabled
+- A local database and backend environment configuration
 
-The project has been developed using a PostgreSQL database named `Food_rescue_db`. If you already have the database, **do not drop or recreate it** just to run the application.
+### Backend
 
-### 1. Backend setup
-
-Open a terminal in the project folder:
+From the repository root:
 
 ```powershell
 cd backend
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+# Install dependencies using the backend's maintained dependency file.
+# Configure backend/.env locally (never commit it).
+.\.venv\Scripts\python.exe -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-Skip the virtual environment creation step if you already have a working one.
+API documentation: `http://127.0.0.1:8000/docs`
 
-Create `backend/.env` using `backend/.env.example` as a reference. Set your PostgreSQL connection string and a strong JWT secret. For example:
+### Frontend
 
-```env
-DATABASE_URL=postgresql+psycopg://postgres:YOUR_URL_ENCODED_PASSWORD@localhost:5432/Food_rescue_db
-JWT_SECRET=REPLACE_WITH_A_LONG_RANDOM_SECRET
-CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
-```
-
-If your database password contains special URL characters, encode them correctly. Never commit `.env` or API keys to GitHub.
-
-Start the API:
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn main:app --reload --port 8000
-```
-
-For a fresh installation, create an admin account using the project's `create_admin.py` script as appropriate. Existing installations should keep their current admin account and database records.
-
-### 2. Frontend setup
-
-Open a second terminal from the project root:
+In another terminal from the repository root:
 
 ```powershell
 cd frontend
@@ -147,96 +210,76 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000` in your browser.
+Local frontend: `http://localhost:3000`
 
-Useful links:
+### Coordinator worker
 
-- Frontend: `http://localhost:3000`
-- API health: `http://127.0.0.1:8000/api/health`
-- FastAPI documentation: `http://127.0.0.1:8000/docs`
-
-Both the frontend and backend servers must be running for login and other API operations to work.
-
-### 3. Optional coordinator worker
-
-The coordinator can be triggered from its dashboard. If using the worker script included with the project, start it in another terminal:
+From `backend/`, in **one terminal only**:
 
 ```powershell
-cd backend
-.\.venv\Scripts\python.exe agent_worker.py --interval 30
+.\.venv\Scripts\python.exe agent_worker.py
 ```
 
-Do not start multiple copies of the worker in this prototype. The worker is optional for a local demonstration.
+### ML explanation microservice
 
-## How I test the complete flow
-
-1. Sign in as an administrator and verify a test provider and NGO.
-2. Set the relevant locations for the provider pickup and NGO.
-3. Create a sample donation with a future pickup deadline.
-4. Run the coordinator and check which NGO receives the offer and why.
-5. Sign in as the NGO and accept the offer.
-6. Open the donation tracking screen to view the pickup point, destination and estimated road route.
-7. Display the provider's QR and scan it from the NGO account to record pickup.
-8. Enable location sharing, check the collector marker and its update time, then stop sharing.
-9. Record the delivery receipt and check that the donation is completed.
-10. Review the activity history and admin reports.
-
-For local demonstration, I use synthetic donation records rather than arranging real pickups.
-
-## Tests and checks
-
-The project includes backend tests under `backend/tests`. They can be run from the backend directory with:
+From the **repository root**:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests -v
+.\ml_service\.venv\Scripts\python.exe -m uvicorn ml_service.app:app --host 127.0.0.1 --port 8100
 ```
 
-The frontend production build can be checked with:
+Service documentation: `http://127.0.0.1:8100/docs`
 
-```powershell
-cd frontend
-npm run build
+The default local mode produces deterministic explanations without loading Qwen. GPU inference needs compatible PyTorch/Transformers/PEFT dependencies and the private saved adapter.
+
+### Example non-secret configuration
+
+```dotenv
+CORS_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+T3_COORDINATOR_MODE=legacy
+T3_DEMO_EXECUTION_ENABLED=false
+ANNSETU_EXPLANATIONS_ENABLED=true
+ANNSETU_ML_SERVICE_URL=http://127.0.0.1:8100/v1/explain
+ANNSETU_FAIR_MATCHING=false
 ```
 
-The modular frontend has completed a local Vite build. I have also checked the map and GPS-sharing interface in the browser. Other end-to-end flows should be retested after frontend changes. I am not claiming that the latest codebase has passed every backend test or production-level security test.
+Also configure a **strong private `JWT_SECRET`** and valid database credentials. Do not commit `.env`, secret keys, backups, or model weights.
 
-## Main API endpoints
+## 12. Testing
 
-| Purpose | Endpoint |
-| --- | --- |
-| Registration and login | `/api/auth/register`, `/api/auth/login` |
-| Account and organisation location | `/api/me`, `/api/me/location` |
-| Donations | `/api/donations` |
-| Donation location and route | `/api/donations/{id}/geo` |
-| Coordinator | `/api/agent/run` |
-| NGO offers | `/api/offers`, `/api/offers/{id}/respond` |
-| QR pickup verification | `/api/donations/{id}/qr`, `/api/donations/{id}/pickup` |
-| Journey and audit details | `/api/donations/{id}/tracking`, `/api/audit` |
-| Collector GPS | `/api/donations/{id}/live`, `/live/start`, `/live/update`, `/live/stop` under the same donation path |
-| Delivery confirmation | `/api/donations/{id}/delivery-confirm`, `/api/donations/{id}/delivery-receipt` |
-| Admin verification | `/api/admin/users`, `/api/admin/users/{id}/verify` |
-| Reports and statistics | `/api/reports`, `/api/stats` |
+Local tests and manual verification have covered:
 
-For the full set of available endpoints and request formats, see `/docs` while FastAPI is running.
+- T3 bridge regression checks (**6 passed**) and ML service contract checks (**5 passed**).
+- Read-only health probes for backend (`8000`) and ML service (`8100`).
+- Simultaneous acceptance of the same offer and competing offers for one donation (**2 isolated PostgreSQL concurrency cases passed**).
+- Simultaneous T3 offer-creation attempts (**1 isolated PostgreSQL race test passed**).
+- NGO matching, acceptance, QR pickup, delivery confirmation, and activity history.
+- Admin-only endpoint rejection for NGO and provider accounts (**HTTP 403**) and requests without authentication (**HTTP 401**).
+- GPU loading of the Qwen base model and LoRA adapter, with restricted response validation.
 
-## Optional LLM-assisted matching
+These checks establish the **tested local prototype behavior**, not comprehensive production readiness.
 
-The platform works without an LLM key. If I want to experiment with model-assisted ranking, I can add the following values to my private `backend/.env`:
+## 13. Current Limitations
 
-```env
-ENABLE_LLM_RANKING=true
-OPENAI_API_KEY=YOUR_PRIVATE_KEY
-OPENAI_MODEL=gpt-4.1-mini
-```
+- The application is currently a **local prototype**, not a public production deployment.
+- GPU-hosted Qwen inference is not permanently available; deterministic explanations serve as fallback.
+- Fair matching remains disabled pending full integration testing.
+- OSRM durations are estimates, not live-traffic or guaranteed pickup times.
+- Test and simulation data must not be represented as real food deliveries.
+- Production security, operational monitoring, scaling, worker uptime, and real-world food safety require further validation.
 
-The model is only allowed to choose from NGOs already approved by the matching rules. The deterministic coordinator remains the fallback if the model is unavailable or returns an invalid choice. This optional integration should be tested separately before reporting it as a demonstrated feature.
+## 14. Future Work
 
-## Current limitations
+- Validate and enable workload-aware matching if appropriate.
+- Deploy the full stack with secure infrastructure and operational monitoring.
+- Expand evaluation of explanation quality and factual grounding.
+- Introduce stronger food safety, operational verification, and real-world NGO onboarding.
+- Add production-level notifications, monitoring, and recovery procedures.
 
-This is still a local MVP. Before anyone uses it for real food distribution, it would need stronger NGO onboarding and identity verification, food-safety review, privacy and consent procedures, HTTPS deployment, database migrations, rate limiting, monitoring, operational support and a more robust background worker.
+## 15. Conclusion
 
-The road route is an estimate, and browser GPS can become inaccurate or stop updating. A delivery receipt is currently self-attested by the NGO account rather than independently approved by a receiving officer. The system does not establish whether food is safe or whether a donation actually reached its intended beneficiaries.
+AnnSetu-AI demonstrates how Agentic AI, geospatial data, deterministic backend rules, and experimental fine-tuned language-model explanations can support a transparent surplus-food redistribution workflow.
 
-## Next steps
-
-The immediate focus is on checking the refactored frontend, strengthening automated tests, improving error handling and preparing a reliable deployment. Separate collector and receiving-officer accounts can be considered after the current workflow is stable.
+**Category:** T3 — Agentic AI  
+**Project type:** BCA Capstone — Functional Local Prototype  
+**Repository:** https://github.com/niharikabansal675-bot/AnnSetu-AI
