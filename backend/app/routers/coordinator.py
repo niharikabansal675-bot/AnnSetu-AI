@@ -1,6 +1,8 @@
 from __future__ import annotations
+import os
 from fastapi import APIRouter
 from ..dependencies import *
+from sqlalchemy import func
 
 router = APIRouter()
 
@@ -18,10 +20,24 @@ def locality_distance(a,b):
 @router.post('/api/agent/run')
 def run_coordinator(user:User=Depends(current_user),db:Session=Depends(db_session)):
     require_role(user,'admin','provider')
+    # Only one matching engine may own the live coordinator route.
+    # The preview/demo modes intentionally pause legacy automatic matching.
+    if os.getenv('T3_COORDINATOR_MODE', 'legacy').strip().lower() != 'legacy':
+        raise HTTPException(status_code=409, detail='Legacy coordinator paused by T3_COORDINATOR_MODE')
     rows=db.scalars(select(Donation).where(Donation.status=='available').order_by(Donation.created_at.asc())).all()
     if user.role=='provider': rows=[d for d in rows if d.provider_id==user.id]
     created=[]; escalated=[]; skipped=[]
     for d in rows:
+        # T3 and the legacy coordinator MUST lock the same donation row before
+        # reading pending offers or creating a new one. PostgreSQL serialises
+        # concurrent attempts for this donation until this transaction commits.
+        locked = db.scalar(select(Donation).where(Donation.id == d.id).with_for_update())
+        if locked is None:
+            continue
+        db.refresh(locked)  # invalidate any previously loaded, now-stale state
+        d = locked
+        if d.status != 'available':
+            continue
         expire_if_needed(db,d)
         if d.status!='available': continue
         # Observe: check outstanding offer; expire timeouts
@@ -89,7 +105,59 @@ def run_coordinator(user:User=Depends(current_user),db:Session=Depends(db_sessio
         if not eligible:
             log(db,d.id,'agent','escalation','No eligible NGO with confirmed location (real donations), matching capacity, verification and deadline; check GIS coordinates or radius')
             escalated.append(d.id); continue
-        distance,_,ngo,distance_method=eligible[0]
+        # Default: retain the existing fastest-route ranking.
+        distance, _, ngo, distance_method = eligible[0]
+
+        # Optional fairness policy.
+        if os.getenv("ANNSETU_FAIR_MATCHING", "false").lower() == "true":
+            best = eligible[0]
+
+            # Consider only NGOs with comparable travel estimates.
+            # If the fastest NGO has a road ETA, compare only measured ETAs.
+            best_road = road_estimates.get(best[2].id)
+
+            if best_road:
+                best_minutes = best_road["route_duration_minutes"]
+                comparable = [
+                    candidate for candidate in eligible
+                    if candidate[2].id in road_estimates
+                    and road_estimates[candidate[2].id]["route_duration_minutes"]
+                        <= best_minutes + 6
+                ]
+            else:
+                # Without verified road ETA, use a narrow straight-line
+                # shortlist rather than the entire 20 km radius.
+                best_km = best[0]
+                comparable = [
+                    candidate for candidate in eligible
+                    if candidate[0] <= best_km + 2
+                ]
+
+            if comparable:
+                candidate_ids = [item[2].id for item in comparable]
+
+                counts = dict(
+                    db.execute(
+                        select(Offer.ngo_id, func.count(Offer.id))
+                        .where(Offer.ngo_id.in_(candidate_ids))
+                        .group_by(Offer.ngo_id)
+                    ).all()
+                )
+
+                # Prefer fewer historical offers; preserve original
+                # routing priority when workload counts are equal.
+                original_rank = {
+                    item[2].id: index for index, item in enumerate(eligible)
+                }
+
+                comparable.sort(
+                    key=lambda item: (
+                        counts.get(item[2].id, 0),
+                        original_rank[item[2].id]
+                    )
+                )
+
+                distance, _, ngo, distance_method = comparable[0]
         # Optional LLM assists selection only within the backend-approved shortlist.
         # It never receives identities, addresses, credentials or unrestricted tools.
         ai_note='Deterministic coordination policy'

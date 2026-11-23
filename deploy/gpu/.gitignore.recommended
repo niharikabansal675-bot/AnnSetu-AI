@@ -1,0 +1,7 @@
+# Add these entries to the project root .gitignore
+private_models/
+ml_service/.venv/
+backend/.venv/
+**/.env
+**/.env.*
+!**/.env.example

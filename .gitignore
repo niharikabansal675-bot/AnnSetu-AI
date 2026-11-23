@@ -37,3 +37,20 @@ Thumbs.db
 
 # Local files
 uploads/
+
+# Trained AI model weights
+*.safetensors
+*.bin
+annsetu_qwen_adapter/
+*.zip
+
+# PostgreSQL backups
+*.backup
+*.dump
+
+# Temporary cleanup and test files
+cleanup_fairness_test.py
+app_backup.py
+
+# Local deployment dependency checks
+requirements_deploy_check.txt
