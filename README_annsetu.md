@@ -279,7 +279,3 @@ These checks establish the **tested local prototype behavior**, not comprehensiv
 ## 15. Conclusion
 
 AnnSetu-AI demonstrates how Agentic AI, geospatial data, deterministic backend rules, and experimental fine-tuned language-model explanations can support a transparent surplus-food redistribution workflow.
-
-**Category:** T3 — Agentic AI  
-**Project type:** BCA Capstone — Functional Local Prototype  
-**Repository:** https://github.com/niharikabansal675-bot/AnnSetu-AI
