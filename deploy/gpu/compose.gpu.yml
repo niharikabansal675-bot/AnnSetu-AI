@@ -1,0 +1,21 @@
+# Apply on a private Linux GPU host, from the project root.
+services:
+  annsetu-llm:
+    build:
+      context: .
+      dockerfile: deploy/gpu/Dockerfile
+    ports:
+      - "127.0.0.1:8100:8100"
+    environment:
+      ANNSETU_USE_MODEL: "true"
+      ANNSETU_BASE_MODEL: "Qwen/Qwen3-0.6B"
+      ANNSETU_ADAPTER_PATH: "/models/annsetu_qwen_adapter"
+      ANNSETU_SERVICE_KEY: "${ANNSETU_SERVICE_KEY:?Set ANNSETU_SERVICE_KEY in environment}"
+      HF_HOME: /model-cache
+    volumes:
+      - ./private_models/annsetu_qwen_adapter:/models/annsetu_qwen_adapter:ro
+      - hf_cache:/model-cache
+    gpus: all
+    restart: unless-stopped
+volumes:
+  hf_cache:

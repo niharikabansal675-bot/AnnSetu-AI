@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import CORS_ORIGINS
 from .database import Base, engine
 from . import models  # register all ORM tables before create_all
-from .routers import auth, locations, donations, offers, coordinator, audit, handover, delivery, admin
+from .routers import auth, locations, donations, offers, coordinator, audit, handover, delivery, admin, t3_preview, t3_execute
 
 app = FastAPI(title='Food Rescue API', version='0.1.0', description='Ghaziabad food rescue coordination API')
 app.add_middleware(
@@ -22,6 +22,5 @@ def startup():
 def health():
     return {'status':'ok','service':'food-rescue-api'}
 
-# Keep API paths and method signatures exactly as in the working monolith.
-for router_module in (auth, locations, donations, offers, coordinator, audit, handover, delivery, admin):
+for router_module in (auth, locations, donations, offers, coordinator, audit, handover, delivery, admin, t3_preview, t3_execute):
     app.include_router(router_module.router)

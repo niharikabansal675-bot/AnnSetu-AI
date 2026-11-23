@@ -19,22 +19,49 @@ def list_offers(user:User=Depends(current_user),db:Session=Depends(db_session)):
 @router.post('/api/offers/{offer_id}/respond')
 def respond(offer_id:int,body:OfferAction,user:User=Depends(current_user),db:Session=Depends(db_session)):
     require_role(user,'ngo')
-    offer=db.get(Offer,offer_id)
-    if not offer or offer.ngo_id!=user.id: raise HTTPException(404,'Offer not found')
-    d=db.get(Donation,offer.donation_id)
-    if offer.status!='pending' or aware(offer.expires_at)<=utcnow() or d.status!='available' or aware(d.deadline)<=utcnow(): raise HTTPException(409,'Offer is no longer active')
+    # Obtain donation ID first, but do not trust any status read before locking.
+    donation_id=db.scalar(select(Offer.donation_id).where(Offer.id==offer_id,Offer.ngo_id==user.id))
+    if donation_id is None:
+        raise HTTPException(404,'Offer not found')
+
+    # Shared lock ordering with the legacy and T3 coordinators: donation first.
+    # Protects against accepting an offer while another transaction is changing
+    # donation availability or creating/reconciling an offer.
+    d=db.scalar(select(Donation).where(Donation.id==donation_id).with_for_update())
+    if d is None:
+        raise HTTPException(404,'Donation not found')
+    offer=db.scalar(select(Offer).where(Offer.id==offer_id,Offer.ngo_id==user.id).with_for_update())
+    if offer is None:
+        raise HTTPException(404,'Offer not found')
+    db.refresh(d)
+    db.refresh(offer)
+    now=utcnow()
+    if (offer.status!='pending' or aware(offer.expires_at)<=now
+            or d.status!='available' or aware(d.deadline)<=now):
+        raise HTTPException(409,'Offer is no longer active')
+
+    # Enforce exact demo/real separation for BOTH accept and decline.
+    # An NGO should not act on offers belonging to the other environment.
+    if user.is_demo != d.is_demo:
+        raise HTTPException(403,'NGO and donation must belong to the same environment')
+
     if body.decision=='accept':
-        if not user.verified or (not user.is_demo and d.is_demo): raise HTTPException(403,'NGO is not eligible to accept this donation')
-        if user.capacity<d.quantity: raise HTTPException(409,'Insufficient NGO capacity')
-        if aware(d.deadline)<=utcnow()+timedelta(minutes=30): raise HTTPException(409,'Collection deadline is too close')
-        # Lock ensures exactly one accepted NGO in PostgreSQL; SQLite serialises writers for prototype.
-        locked=db.scalar(select(Donation).where(Donation.id==d.id).with_for_update())
-        if locked.status!='available': raise HTTPException(409,'Already accepted')
-        locked.status='accepted'; locked.accepted_ngo_id=user.id
+        if not user.verified:
+            raise HTTPException(403,'NGO is no longer verified')
+        if user.capacity<d.quantity:
+            raise HTTPException(409,'Insufficient NGO capacity')
+        if aware(d.deadline)<=now+timedelta(minutes=30):
+            raise HTTPException(409,'Collection deadline is too close')
+        if d.accepted_ngo_id is not None:
+            raise HTTPException(409,'Donation was already assigned')
+        d.status='accepted'; d.accepted_ngo_id=user.id
         offer.status='accepted'
-        for other in db.scalars(select(Offer).where(Offer.donation_id==d.id,Offer.id!=offer.id,Offer.status=='pending')).all(): other.status='withdrawn'
+        for other in db.scalars(select(Offer).where(Offer.donation_id==d.id,Offer.id!=offer.id,Offer.status=='pending')).all():
+            other.status='withdrawn'
         log(db,d.id,'ngo','offer_accepted',f'Accepted by {user.organisation}',user.id)
     else:
-        offer.status='declined'; log(db,d.id,'ngo','offer_declined',f'Declined by {user.organisation}',user.id)
-    offer.responded_at=utcnow();db.commit()
+        offer.status='declined'
+        log(db,d.id,'ngo','offer_declined',f'Declined by {user.organisation}',user.id)
+    offer.responded_at=now
+    db.commit()
     return {'message':'Response saved','status':offer.status}
